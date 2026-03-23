@@ -1,0 +1,17 @@
+# Image generation stack
+diffusers
+accelerate
+transformers<4.47.0
+pillow
+safetensors
+
+# Audio generation stack
+soundfile
+scipy
+torch>=2.2.0
+torchaudio>=2.2.0
+
+# Server framework and utils
+mcp
+huggingface_hub
+tqdm
