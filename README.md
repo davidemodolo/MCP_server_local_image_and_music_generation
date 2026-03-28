@@ -1,150 +1,107 @@
-# Local MCP Server for Batched Image and Audio Generation
+# Local AI Generation MCP Server (`local_ai_gen`)
 
-This repository provides a local MCP (Model Context Protocol) server exposing open source image and audio generation tools. Inference runs on your machine using fast and lightweight modern models.
+This project runs a local MCP (Model Context Protocol) server that exposes tools for:
 
-## What You Get
+1. **Text to Image**
+2. **Text to Music / Audio**
+3. **Text to Speech**
+4. **Image/Text to 3D Model**
 
-- **Image Generation**: Driven by [Segmind SSD-1B](https://huggingface.co/segmind/SSD-1B) (A distilled SDXL model providing 1024x1024 high quality with half the size of SDXL). Batched prompts are supported.
-- **Audio Generation**: Driven by [AudioLDM 2](https://huggingface.co/cvssp/audioldm2) for generating music, sound effects, and speech-style prompts.
-- StdIO MCP server for integration with MCP-compatible clients.
-- Local-first workflow (models downloaded on first run, outputs saved locally).
-- Unified, clean dependencies using Hugging Face `diffusers`.
+## Models Used
 
-## Supported Models
-
-### Image Generation
-- **Model**: `segmind/SSD-1B`
-- **Why**: Distilled version of Stable Diffusion XL (SDXL). It achieves massive quality leaps in prompt adherence, lighting, and anatomy, and it can accurately generate text—all while being 50% smaller and 60% faster than SDXL.
-- **Download Size**: ~2.5GB
-- **VRAM Requirement**: ~4GB+ for optimal hardware generation.
-
-### Audio Generation
-- **Model**: `cvssp/audioldm2`
-- **Why**: Replaces earlier sequential generators like MusicGen. AudioLDM 2 gracefully handles a wide range of tasks—including complex music, environmental sound effects, and speech synthesis—in a single streamlined model.
-- **Download Size**: ~1.1GB
-- **VRAM Requirement**: ~2GB+ 
-
-## Architecture
-
-- `mcp_server/main.py`: MCP tool definitions and input validation
-- `image_gen/image_generator.py`: SSD-1B pipeline and batched image generation
-- `audio_gen/audio_generator.py`: AudioLDM2 loading and audio generation
-- `config.py`: defaults and limits (including image batch limit)
+- **Image Generation**: `segmind/SSD-1B`
+  *A fast, distilled version of SDXL that works well on consumer GPUs.*
+- **Music Generation**: `stabilityai/stable-audio-open-1.0` 
+  *A high-quality open model for generating sound effects, short music tracks, and ambient audio.* *(Note: Requires accepting license terms)*
+- **Speech Generation**: `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` 
+  *A robust, multilingual text-to-speech model.*
+- **3D Generation**: `stabilityai/TripoSR` 
+  *A fast feed-forward model for image-to-3D reconstruction.*
 
 ## Requirements
 
-- Python 3.8+
-- Recommended for image generation: CUDA GPU with 6GB+ VRAM
-- Recommended RAM: 16GB+
-- For audio processing, FFmpeg might still be beneficial on your system depending on your underlying `soundfile` backends, but the core pipeline is entirely native via `diffusers` and `scipy`.
+- Python 3.10+
+- NVIDIA GPU (8GB+ VRAM recommended for running everything smoothly)
+- [Hugging Face User Access Token](https://huggingface.co/settings/tokens) (for `stable-audio-open-1.0`)
 
-## Install
+## Complete Setup Guide
 
-### 1. Create and activate a virtual environment
+### 1. Preparation and Hugging Face Authenication
+
+The **Stable Audio Open** model is gated and requires you to accept its license before downloading.
+
+1. Go to [stabilityai/stable-audio-open-1.0](https://huggingface.co/stabilityai/stable-audio-open-1.0) on Hugging Face.
+2. Log in and click to **Accept the Terms/License**.
+3. Generate a User Access Token in your [Hugging Face Settings](https://huggingface.co/settings/tokens).
+4. Run the Hugging Face CLI login locally:
+    ```bash
+    pip install -U "huggingface_hub"
+    hf auth
+    ```
+    *(Paste your token when prompted. You do not need to add it as a git credential).*
+
+### 2. Environment Installation
 
 ```bash
-python -m venv venv
-source venv/bin/activate
-```
-
-Windows PowerShell:
-
-```powershell
-venv\Scripts\Activate.ps1
-```
-
-### 2. Run setup
-
-```bash
+python -m venv .venv
+source .venv/bin/activate
 python setup.py
 ```
 
-`setup.py` creates output folders and installs the needed Python dependencies via `requirements.txt`.
-*(Note: To ensure compatibility with AudioLDM2, `transformers` and `diffusers` are pinned to specific versions <4.47.0 and <0.33.0 respectively).*
+What `python setup.py` does:
+1. Creates output directories (`generated_images`, `generated_audio`, `generated_models`, `models`)
+2. Clones `third_party/TripoSR` if it is missing
+3. Installs everything from `requirements.txt`
+4. Compiles and installs `torchmcubes` against your active torch version (needed for 3D generation)
+5. Installs `flash-attn`.
 
-## Run the MCP Server
+## Run the MCP server
 
+To run the MCP server manually (via standard I/O):
 ```bash
 python mcp_server/main.py
 ```
 
-The process runs as a stdio MCP server and is intended to be started by your MCP client.
-
-## MCP Tools
-
-### `generate_image` (Batch API)
-
-Generates one image per prompt in one request using **SSD-1B** (distilled SDXL). Recommended resolution is 1024x1024.
-
-Request body:
-
-```json
-{
-  "prompts": [
-    "a cinematic sunrise over alpine mountains",
-    "a watercolor village by a river"
-  ],
-  "width": 1024,
-  "height": 1024,
-  "steps": 20,
-  "negative_prompt": "blurry, low quality",
-  "guidance_scale": 7.5,
-  "seed": 42
-}
-```
-
-Response:
-
-```json
-[
-  {
-    "prompt": "a cinematic sunrise over alpine mountains",
-    "image_path": "generated_images/generated_2026...0.png"
-  },
-  {
-    "prompt": "a watercolor village by a river",
-    "image_path": "generated_images/generated_2026...1.png"
-  }
-]
-```
-
-### `generate_audio`
-
-Generates audio (music, sound effects, etc.) using **AudioLDM 2**.
-
-Request body:
-
-```json
-{
-  "prompt": "an uplifting ambient piano melody",
-  "duration": 6.0,
-  "num_inference_steps": 200,
-  "guidance_scale": 3.5,
-  "seed": 42
-}
-```
-
-Returns a path like:
-
-```text
-generated_audio/generated_2026...wav
-```
-
-Notes:
-
-- `duration` is capped at 30 seconds.
-- `num_inference_steps` works best around `200` for optimal AudioLDM2 quality.
+*Note: The first run of any specific tool will be slower because it has to download the weights for that model into your Hugging Face cache.*
 
 ## Smoke Test
 
-Verify the entire setup works by generating a sample image and audio track locally:
-
+You can run the included smoke test script to verify all models are working correctly:
 ```bash
-python test_setup.py
 python smoke_test_generate.py
 ```
 
-## Troubleshooting
+## MCP Tools Exposed
 
-- First run is slower because model weights are downloaded (around ~2.5GB for Image mapping, ~1.1GB for Audio mapping) into `models/` or your system HF cache.
-- The stack will gracefully fall back to CPU inference if CUDA is missing, but rendering will take considerably longer.
+- `generate_image`
+- `generate_audio`
+- `generate_speech`
+- `generate_3d_model`
+- `health_check`
+
+## Notes
+
+- Generated files are written to `generated_images`, `generated_audio`, and `generated_models` by default.
+- For `generate_audio` and `generate_speech`, you can override the destination with:
+- tool arg `output_dir` (highest priority), or
+- env var `GENAI_OUTPUT_AUDIO_DIR`
+- For `generate_image`, override destination with tool arg `output_dir` or env var `GENAI_OUTPUT_IMAGE_DIR`
+- For `generate_3d_model`, override destination with tool arg `output_dir` or env var `GENAI_OUTPUT_MODEL_DIR`
+
+## Using with MCP Clients (Cursor, Claude Desktop, etc.)
+
+To use this server in an MCP-compatible client, add the following to your `mcp.json` (or the respective MCP configuration file for your client). Make sure to replace `<YOUR_PROJECT_PATH>` with the absolute path to where you cloned this repository:
+
+```json
+{
+  "mcpServers": {
+    "local_ai_gen": {
+      "command": "<YOUR_PROJECT_PATH>/.venv/bin/python",
+      "args": [
+        "<YOUR_PROJECT_PATH>/mcp_server/main.py"
+      ],
+      "env": {}
+    }
+  }
+}
+```

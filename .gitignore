@@ -44,9 +44,9 @@ Thumbs.db
 .env.*
 
 # Local generated artifacts
-generated_images/
-generated_audio/
+generated_*/
 models/
 
 # Optional local state
 *.sqlite3
+third_party/

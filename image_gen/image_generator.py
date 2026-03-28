@@ -7,8 +7,14 @@ import os
 import torch
 from diffusers import StableDiffusionXLPipeline, DPMSolverMultistepScheduler
 import uuid
+import logging
 from datetime import datetime
 from typing import Optional, List
+
+from config import GENERATED_IMAGES_DIR
+
+
+logger = logging.getLogger(__name__)
 
 
 class ImageGenerator:
@@ -28,7 +34,7 @@ class ImageGenerator:
             self.pipe = StableDiffusionXLPipeline.from_pretrained(
                 self.model_name,
                 torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-                use_safetensors=True
+                use_safetensors=True,
             )
 
             # Use DPM++ 2M scheduler for faster sampling
@@ -41,17 +47,47 @@ class ImageGenerator:
 
         except Exception as e:
             print(f"Error loading model: {e}")
-            # Fallback to CPU if CUDA fails
-            if self.device == "cuda":
-                self.device = "cpu"
-                self.pipe = StableDiffusionXLPipeline.from_pretrained(
-                    self.model_name, torch_dtype=torch.float32, use_safetensors=True
-                )
-                self.pipe.scheduler = DPMSolverMultistepScheduler.from_config(
-                    self.pipe.scheduler.config
-                )
-                self.pipe = self.pipe.to(self.device)
-                print(f"Loaded image generation model on CPU")
+            raise
+
+    def _reload_on_cuda(self):
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is not available for GPU-only retry")
+        self.device = "cuda"
+        self.pipe = None
+        torch.cuda.empty_cache()
+        self._load_model()
+
+    @staticmethod
+    def _resolve_output_path(
+        output_filename: Optional[str],
+        output_dir: Optional[str],
+        index: int,
+    ) -> str:
+        env_output_dir = os.getenv("GENAI_OUTPUT_IMAGE_DIR")
+        output_root = (
+            output_dir
+            or env_output_dir
+            or os.path.join(os.getcwd(), GENERATED_IMAGES_DIR)
+        )
+
+        if output_filename and str(output_filename).strip():
+            requested = str(output_filename).strip()
+        else:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            requested = f"generated_{timestamp}_{index}_{uuid.uuid4().hex[:8]}"
+
+        has_directory = os.path.dirname(requested) != ""
+        if has_directory or os.path.isabs(requested):
+            filepath = requested
+        else:
+            filepath = os.path.join(output_root, requested)
+
+        if not filepath.lower().endswith(".png"):
+            filepath = f"{filepath}.png"
+
+        target_dir = os.path.dirname(filepath) or "."
+        os.makedirs(target_dir, exist_ok=True)
+        return filepath
 
     def generate_images(
         self,
@@ -63,6 +99,7 @@ class ImageGenerator:
         guidance_scale=7.5,
         seed=None,
         output_filenames: Optional[List[str]] = None,
+        output_dir: Optional[str] = None,
     ):
         """
         Generate images from text prompts in a single batched request.
@@ -111,7 +148,9 @@ class ImageGenerator:
                     raise ValueError("Each prompt must be a non-empty string")
                 cleaned_prompts.append(prompt.strip())
 
-            if output_filenames is not None and len(output_filenames) != len(cleaned_prompts):
+            if output_filenames is not None and len(output_filenames) != len(
+                cleaned_prompts
+            ):
                 raise ValueError("output_filenames length must match prompts length")
 
             generator = None
@@ -119,35 +158,59 @@ class ImageGenerator:
                 generator = torch.Generator(device=self.device).manual_seed(int(seed))
 
             # Generate all images in one pipeline call to leverage batched tensor math.
-            result = self.pipe(
-                cleaned_prompts,
-                width=width,
-                height=height,
-                num_inference_steps=steps,
-                negative_prompt=negative_prompt,
-                guidance_scale=guidance_scale,
-                generator=generator,
-            )
+            try:
+                result = self.pipe(
+                    cleaned_prompts,
+                    width=width,
+                    height=height,
+                    num_inference_steps=steps,
+                    guidance_scale=guidance_scale,
+                    generator=generator,
+                )
+            except RuntimeError as e:
+                message = str(e).lower()
+                if self.device == "cuda" and ("cudnn" in message or "cuda" in message):
+                    torch.backends.cudnn.enabled = False
+                    print("cuDNN disabled for GPU retry in image generation")
+                    self._reload_on_cuda()
+                    generator = (
+                        torch.Generator(device="cuda").manual_seed(int(seed))
+                        if seed is not None
+                        else None
+                    )
+                    result = self.pipe(
+                        cleaned_prompts,
+                        width=width,
+                        height=height,
+                        num_inference_steps=steps,
+                        guidance_scale=guidance_scale,
+                        generator=generator,
+                    )
+                else:
+                    raise
 
             images = result.images
 
             # Create directory if it doesn't exist
-            os.makedirs("generated_images", exist_ok=True)
+            if output_dir or os.getenv("GENAI_OUTPUT_IMAGE_DIR"):
+                os.makedirs(
+                    output_dir or os.getenv("GENAI_OUTPUT_IMAGE_DIR"), exist_ok=True
+                )
+            else:
+                os.makedirs(GENERATED_IMAGES_DIR, exist_ok=True)
 
             filepaths: List[str] = []
             for i, image in enumerate(images):
-                if output_filenames:
-                    filename = output_filenames[i]
-                    if not filename.lower().endswith(".png"):
-                        filename += ".png"
-                else:
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename = f"generated_{timestamp}_{i}_{uuid.uuid4().hex[:8]}.png"
-                filepath = os.path.join("generated_images", filename)
+                filename = output_filenames[i] if output_filenames else None
+                filepath = self._resolve_output_path(
+                    output_filename=filename,
+                    output_dir=output_dir,
+                    index=i,
+                )
                 image.save(filepath)
                 filepaths.append(filepath)
 
-            print(f"Saved {len(filepaths)} image(s) to generated_images")
+            logger.info("Saved %s image(s)", len(filepaths))
 
             return filepaths
 
@@ -159,4 +222,4 @@ class ImageGenerator:
 # Example usage
 if __name__ == "__main__":
     generator = ImageGenerator()
-    # Example: generator.generate_images(["a highly detailed sci-fi city, cyberpunk"])
+    # Example: generator.generate_images(["a cat", "a dog"])
